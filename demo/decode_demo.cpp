@@ -77,7 +77,7 @@ int main(int argc, char** argv) {
               << len << " bytes)\n";
     for (const auto& d : decoded) {
         if (!d.ok) {
-            std::cout << "  " << d.name << ": <decode not supported yet>\n";
+            std::cout << "  " << d.name << ": <could not decode>\n";
             continue;
         }
         char phys[64];
@@ -86,6 +86,9 @@ int main(int argc, char** argv) {
                   << "    raw=" << d.raw << "  ->  " << phys;
         if (!d.unit.empty())
             std::cout << " " << d.unit;
+        std::string label = dbc::value_description(db, id, d.name, d.raw);
+        if (!label.empty())
+            std::cout << "  (" << label << ")";
         std::cout << "\n";
     }
     return 0;

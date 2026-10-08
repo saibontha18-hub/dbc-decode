@@ -44,3 +44,8 @@ BO_ 512 StatusFlags: 8 PCM
  SG_ CheckEngine : 15|1@1+ (1,0) [0|1] "" TCM
 
 VAL_ 256 EngineSpeed 0 "Stopped" 4000 "Cruise" ;
+
+BO_ 768 BodyControl: 8 PCM
+ SG_ WindowSelect M : 0|4@1+ (1,0) [0|15] "" TCM
+ SG_ FrontLeftPos m1 : 8|8@1+ (0.5,0) [0|127.5] "mm" TCM
+ SG_ FrontRightPos m2 : 8|8@1+ (0.5,0) [0|127.5] "mm" TCM

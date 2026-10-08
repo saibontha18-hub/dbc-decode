@@ -1,4 +1,4 @@
-// test_dbc.cpp - self-contained checks for the day-one parser and decoder.
+// test_dbc.cpp - self-contained checks for the parser and decoder.
 // No framework; a CHECK that trips prints the line and we count failures.
 // Build: make test
 
@@ -38,10 +38,12 @@ BO_ 256 EngineData: 8 PCM
 
 BO_ 768 BigEndianMsg: 8 PCM
  SG_ Counter : 7|12@0+ (1,0) [0|4095] "" TCM
+ SG_ Temp : 23|8@0- (1,0) [-128|127] "degC" TCM
 
 BO_ 1024 MuxMsg: 8 PCM
  SG_ Mode M : 0|4@1+ (1,0) [0|15] "" TCM
  SG_ ValueA m1 : 8|8@1+ (1,0) [0|255] "" TCM
+ SG_ ValueB m2 : 16|8@1+ (1,0) [0|255] "" TCM
 
 VAL_ 256 EngineSpeed 0 "Stopped" 4000 "Cruise" ;
 )";
@@ -96,16 +98,18 @@ static void test_parse_signal_fields() {
     CHECK_NEAR(t.offset, -40.0, 1e-12);
     CHECK(t.unit == "degC");
     const auto& m = db.messages[1].signals[0];
-    CHECK(m.intel == false); // Motorola: parsed, not yet decoded
+    CHECK(m.intel == false); // Motorola: parsed on day one, decoded on day two
+    CHECK(db.messages[1].signals[1].is_signed == true);
     ok("parse signal fields");
 }
 
 static void test_parse_mux_markers() {
     auto db = parse_test_db();
     const auto& mux = db.messages[2];
-    CHECK(mux.signals.size() == 2);
+    CHECK(mux.signals.size() == 3);
     CHECK(mux.signals[0].mux == "M");
     CHECK(mux.signals[1].mux == "m1");
+    CHECK(mux.signals[2].mux == "m2");
     ok("parse mux markers");
 }
 
@@ -151,13 +155,86 @@ static void test_decode_signed_negative() {
     ok("decode signed negative");
 }
 
-static void test_decode_motorola_deferred() {
+// BigEndianMsg payload: AB C0 FF 00 00 00 00 00
+//   Counter : 7|12@0+ -> byte0 bits 7..0 (0xAB) then byte1 bits 15..12 (0xC)
+//                     -> raw 0xABC = 2748
+//   Temp    : 23|8@0-  -> byte2 = 0xFF -> raw -1 (signed)
+static void test_decode_motorola() {
     auto db = parse_test_db();
-    uint8_t p[8] = {0xFF, 0xFF, 0, 0, 0, 0, 0, 0};
+    uint8_t p[8] = {0xAB, 0xC0, 0xFF, 0, 0, 0, 0, 0};
     auto out = dbc::decode_message(db, 768, p, 8);
+    CHECK(out.size() == 2);
+    CHECK(out[0].name == "Counter");
+    CHECK(out[0].ok);
+    CHECK(out[0].raw == 0xABC);
+    CHECK_NEAR(out[0].physical, 2748.0, 1e-9);
+    CHECK(out[1].name == "Temp");
+    CHECK(out[1].ok);
+    CHECK(out[1].raw == -1);
+    CHECK_NEAR(out[1].physical, -1.0, 1e-9);
+    ok("decode motorola signals");
+}
+
+// Motorola signal that crosses a byte boundary mid-signal:
+// 4|9@0+ takes byte0 bits 4..0 then byte1 bits 15..12.
+static void test_decode_motorola_cross_byte() {
+    auto db = parse_test_db();
+    dbc::Database db2;
+    std::string err;
+    std::istringstream in(
+        "BO_ 100 Cross: 8 X\n"
+        " SG_ Big : 4|9@0+ (1,0) [0|511] \"\" X\n");
+    CHECK(dbc::parse(in, db2, err));
+    // byte0 = 0x1F (bits 4..0 all set), byte1 top nibble = 0xA
+    uint8_t p[8] = {0x1F, 0xA0, 0, 0, 0, 0, 0, 0};
+    auto out = dbc::decode_message(db2, 100, p, 8);
     CHECK(out.size() == 1);
-    CHECK(!out[0].ok); // day two; must not silently mis-decode
-    ok("motorola decode deferred");
+    CHECK(out[0].ok);
+    CHECK(out[0].raw == 0x1FA); // 11111_1010
+    // signal reaching past the payload must not read out of bounds
+    // (1-byte message, 12-bit Motorola signal spilling into byte 1)
+    dbc::Database db3;
+    std::istringstream in2(
+        "BO_ 101 Short: 1 X\n"
+        " SG_ Big : 7|12@0+ (1,0) [0|4095] \"\" X\n");
+    CHECK(dbc::parse(in2, db3, err));
+    uint8_t shortp[1] = {0xAB};
+    auto out2 = dbc::decode_message(db3, 101, shortp, 1);
+    CHECK(out2.size() == 1);
+    CHECK(!out2[0].ok);
+    ok("decode motorola cross-byte");
+}
+
+// MuxMsg: Mode is the switch; only the signal matching the switch value
+// comes back, the switch itself always does.
+static void test_decode_mux() {
+    auto db = parse_test_db();
+    uint8_t p[8] = {0x01, 0x11, 0x22, 0, 0, 0, 0, 0}; // Mode = 1
+    auto out = dbc::decode_message(db, 1024, p, 8);
+    CHECK(out.size() == 2);
+    CHECK(out[0].name == "Mode");
+    CHECK(out[0].raw == 1);
+    CHECK(out[1].name == "ValueA");
+    CHECK(out[1].raw == 0x11);
+
+    uint8_t q[8] = {0x02, 0x11, 0x22, 0, 0, 0, 0, 0}; // Mode = 2
+    auto out2 = dbc::decode_message(db, 1024, q, 8);
+    CHECK(out2.size() == 2);
+    CHECK(out2[0].name == "Mode");
+    CHECK(out2[0].raw == 2);
+    CHECK(out2[1].name == "ValueB");
+    CHECK(out2[1].raw == 0x22);
+    ok("decode multiplexed signals");
+}
+
+static void test_value_description() {
+    auto db = parse_test_db();
+    CHECK(dbc::value_description(db, 256, "EngineSpeed", 4000) == "Cruise");
+    CHECK(dbc::value_description(db, 256, "EngineSpeed", 0) == "Stopped");
+    CHECK(dbc::value_description(db, 256, "EngineSpeed", 123) == "");
+    CHECK(dbc::value_description(db, 256, "CoolantTemp", 90) == "");
+    CHECK(dbc::value_description(db, 999, "Nope", 0) == "");
+    ok("value descriptions");
 }
 
 static void test_decode_bad_inputs() {
@@ -189,7 +266,7 @@ static void test_parse_demo_file() {
     std::ifstream in("demo/demo.dbc");
     CHECK(!!in);
     CHECK(dbc::parse(in, db, err));
-    CHECK(db.messages.size() == 2);
+    CHECK(db.messages.size() == 3);
     uint8_t p[8] = {0x80, 0x00, 0x00, 0xA0, 0x0F, 0x5A, 0xFF, 0x00};
     auto out = dbc::decode_message(db, 256, p, 8);
     CHECK(out.size() == 3);
@@ -201,6 +278,14 @@ static void test_parse_demo_file() {
     CHECK(flags.size() == 2);
     CHECK(flags[0].raw == 1); // OilPressureLow
     CHECK(flags[1].raw == 1); // CheckEngine
+    // multiplexed sample: WindowSelect = 2 -> only FrontRightPos applies
+    uint8_t r[8] = {0x02, 0xC8, 0, 0, 0, 0, 0, 0};
+    auto body = dbc::decode_message(db, 768, r, 8);
+    CHECK(body.size() == 2);
+    CHECK(body[0].name == "WindowSelect");
+    CHECK(body[1].name == "FrontRightPos");
+    CHECK(body[1].raw == 0xC8);
+    CHECK_NEAR(body[1].physical, 100.0, 1e-9);
     ok("parse and decode demo.dbc");
 }
 
@@ -212,7 +297,10 @@ int main() {
     test_parse_val_table();
     test_decode_engine_data();
     test_decode_signed_negative();
-    test_decode_motorola_deferred();
+    test_decode_motorola();
+    test_decode_motorola_cross_byte();
+    test_decode_mux();
+    test_value_description();
     test_decode_bad_inputs();
     test_parse_garbage();
     test_parse_demo_file();

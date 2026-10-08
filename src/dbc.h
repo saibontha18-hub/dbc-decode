@@ -65,8 +65,16 @@ bool parse(std::istream& in, Database& db, std::string& err);
 
 // Decode every signal of one message from a raw payload.
 // Unknown id or payload shorter than the message DLC -> empty vector.
+// Multiplexer-aware: multiplexed signals ("m3") are only returned when the
+// multiplexer switch ("M") in the same message decodes to their selector
+// value; the switch itself is always returned.
 std::vector<DecodedSignal> decode_message(const Database& db, uint32_t id,
                                           const uint8_t* payload, size_t len);
+
+// VAL_ lookup: the description for `raw` of `signal` in message `id`,
+// or "" when the table has no entry for it.
+std::string value_description(const Database& db, uint32_t id,
+                              const std::string& signal, int64_t raw);
 
 } // namespace dbc
 
